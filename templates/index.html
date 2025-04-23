@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Welcome to College Timetable Scheduler</h2>
+    <p>This application helps Heads of Departments manage their department's daily timetable.</p>
+    <div style="margin-top: 20px;">
+        <a href="{{ url_for('login') }}" class="btn">Login</a>
+        <a href="{{ url_for('register') }}" class="btn" style="margin-left: 10px;">Register</a>
+    </div>
+</div>
+
+<div class="card">
+    <h3>Features</h3>
+    <ul style="list-style-type: none; padding: 0;">
+        <li style="margin: 10px 0;">✓ Teacher Management</li>
+        <li style="margin: 10px 0;">✓ Daily Attendance Tracking</li>
+        <li style="margin: 10px 0;">✓ Flexible College Timings</li>
+        <li style="margin: 10px 0;">✓ Automatic Timetable Generation</li>
+        <li style="margin: 10px 0;">✓ PDF Export</li>
+    </ul>
+</div>
+{% endblock %} 

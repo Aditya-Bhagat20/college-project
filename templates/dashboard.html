@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Welcome, {{ current_user.name }} ({{ current_user.department }})</h2>
+</div>
+
+<div class="card">
+    <h3>Add New Teacher</h3>
+    <form action="{{ url_for('add_teacher') }}" method="POST">
+        <div class="form-group">
+            <label for="name">Teacher Name:</label>
+            <input type="text" id="name" name="name" required>
+        </div>
+        <div class="form-group">
+            <label for="subject">Subject:</label>
+            <input type="text" id="subject" name="subject" required>
+        </div>
+        <div class="form-group">
+            <label for="lecture_type">Lecture Type:</label>
+            <select id="lecture_type" name="lecture_type" required>
+                <option value="theory">Theory</option>
+                <option value="practical">Practical</option>
+            </select>
+        </div>
+        <button type="submit" class="btn">Add Teacher</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>College Timings</h3>
+    <form action="{{ url_for('update_timings') }}" method="POST">
+        <div class="form-group">
+            <label for="start_time">Start Time:</label>
+            <input type="time" id="start_time" name="start_time" value="{{ timings.start_time if timings else '09:00' }}" required>
+        </div>
+        <div class="form-group">
+            <label for="end_time">End Time:</label>
+            <input type="time" id="end_time" name="end_time" value="{{ timings.end_time if timings else '17:00' }}" required>
+        </div>
+        <div class="form-group">
+            <label for="lunch_start">Lunch Start:</label>
+            <input type="time" id="lunch_start" name="lunch_start" value="{{ timings.lunch_start if timings else '13:00' }}" required>
+        </div>
+        <div class="form-group">
+            <label for="lunch_end">Lunch End:</label>
+            <input type="time" id="lunch_end" name="lunch_end" value="{{ timings.lunch_end if timings else '14:00' }}" required>
+        </div>
+        <div class="form-group">
+            <label for="short_break_start">Short Break Start (Optional):</label>
+            <input type="time" id="short_break_start" name="short_break_start" value="{{ timings.short_break_start if timings else '' }}">
+        </div>
+        <div class="form-group">
+            <label for="short_break_end">Short Break End (Optional):</label>
+            <input type="time" id="short_break_end" name="short_break_end" value="{{ timings.short_break_end if timings else '' }}">
+        </div>
+        <button type="submit" class="btn">Update Timings</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Teachers List</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Subject</th>
+                <th>Type</th>
+                <th>Present Today</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for teacher in teachers %}
+            <tr>
+                <td>{{ teacher.name }}</td>
+                <td>{{ teacher.subject }}</td>
+                <td>{{ teacher.lecture_type }}</td>
+                <td>
+                    <input type="checkbox" 
+                           class="attendance-checkbox" 
+                           data-teacher-id="{{ teacher.id }}"
+                           {% if teacher.is_present %}checked{% endif %}>
+                </td>
+                <td>
+                    <form action="{{ url_for('delete_teacher', teacher_id=teacher.id) }}" method="POST" style="display: inline;">
+                        <button type="submit" class="btn" style="background-color: #dc3545;">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Generate Timetable</h3>
+    <button id="generate-btn" class="btn">Generate Today's Timetable</button>
+    <div id="timetable-result" style="margin-top: 20px;"></div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Handle attendance checkboxes
+    document.querySelectorAll('.attendance-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', function() {
+            const teacherId = this.dataset.teacherId;
+            const isPresent = this.checked;
+            
+            fetch('/update-attendance', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    teacher_id: teacherId,
+                    is_present: isPresent
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    alert('Failed to update attendance');
+                    this.checked = !isPresent;
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred while updating attendance');
+                this.checked = !isPresent;
+            });
+        });
+    });
+    
+    // Handle timetable generation
+    document.getElementById('generate-btn').addEventListener('click', function() {
+        fetch('/generate-timetable', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const resultDiv = document.getElementById('timetable-result');
+                resultDiv.innerHTML = '<h4>Generated Timetable</h4>';
+                
+                if (data.timetable.length === 0) {
+                    resultDiv.innerHTML += '<p>No timetable generated. Please check if you have set timings and marked teachers present.</p>';
+                    return;
+                }
+                
+                const table = document.createElement('table');
+                const thead = document.createElement('thead');
+                const tbody = document.createElement('tbody');
+                
+                // Create header
+                const headerRow = document.createElement('tr');
+                ['Time', 'Subject', 'Teacher', 'Type'].forEach(text => {
+                    const th = document.createElement('th');
+                    th.textContent = text;
+                    headerRow.appendChild(th);
+                });
+                thead.appendChild(headerRow);
+                
+                // Create rows
+                data.timetable.forEach(entry => {
+                    const row = document.createElement('tr');
+                    [entry.start_time + ' - ' + entry.end_time, entry.subject, entry.teacher_name, entry.lecture_type].forEach(text => {
+                        const td = document.createElement('td');
+                        td.textContent = text;
+                        row.appendChild(td);
+                    });
+                    tbody.appendChild(row);
+                });
+                
+                table.appendChild(thead);
+                table.appendChild(tbody);
+                resultDiv.appendChild(table);
+                
+                // Add download button
+                const downloadBtn = document.createElement('button');
+                downloadBtn.className = 'btn';
+                downloadBtn.textContent = 'Download PDF';
+                downloadBtn.onclick = () => window.location.href = '/download-timetable';
+                resultDiv.appendChild(downloadBtn);
+            } else {
+                alert('Failed to generate timetable: ' + data.error);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred while generating timetable');
+        });
+    });
+});
+</script>
+{% endblock %} 
