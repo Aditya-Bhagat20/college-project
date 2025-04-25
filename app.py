@@ -153,9 +153,11 @@ def update_timings():
     return redirect(url_for('dashboard'))
 
 class TimetableChromosome:
-    def __init__(self, slots, teachers):
+    def __init__(self, slots, teachers, division_id=None, existing_schedules=None):
         self.slots = slots
         self.teachers = teachers
+        self.division_id = division_id
+        self.existing_schedules = existing_schedules or {}  # Track other divisions' schedules
         self.schedule = {}
         self.fitness = 0
         self.initialize()
@@ -163,8 +165,12 @@ class TimetableChromosome:
     def initialize(self):
         # Get all practical teachers
         practical_teachers = [t for t in self.teachers if t.lecture_type == 'practical']
+        theory_teachers = [t for t in self.teachers if t.lecture_type == 'theory']
         
-        # If there are practical teachers, randomly select ONE
+        # Initialize teacher availability
+        teacher_availability = {teacher.id: True for teacher in self.teachers}
+        
+        # If there are practical teachers, schedule them first
         if practical_teachers:
             # Shuffle practical teachers to ensure random selection
             random.shuffle(practical_teachers)
@@ -180,30 +186,59 @@ class TimetableChromosome:
                 time1 = datetime.strptime(slot1, '%H:%M')
                 time2 = datetime.strptime(slot2, '%H:%M')
                 if (time2 - time1).total_seconds() / 3600 == 1:
-                    possible_blocks.append((slot1, slot2))
+                    # Check if teacher is available in this block across all divisions
+                    if not self.is_teacher_busy(selected_practical.id, slot1) and \
+                       not self.is_teacher_busy(selected_practical.id, slot2):
+                        possible_blocks.append((slot1, slot2))
             
             # If we found valid blocks, randomly select ONE
             if possible_blocks:
-                # Shuffle blocks to ensure random selection
                 random.shuffle(possible_blocks)
                 block = possible_blocks[0]
                 self.schedule[block[0]] = selected_practical
                 self.schedule[block[1]] = selected_practical
+                teacher_availability[selected_practical.id] = False
         
         # Schedule theory teachers in remaining slots
-        theory_teachers = [t for t in self.teachers if t.lecture_type == 'theory']
         available_teachers = theory_teachers.copy()
-        random.shuffle(available_teachers)  # Shuffle for random selection
+        random.shuffle(available_teachers)
         
-        for slot in self.slots:
-            if slot not in self.schedule and available_teachers:
-                teacher = available_teachers.pop()
-                self.schedule[slot] = teacher
+        # Track teacher load to ensure fair distribution
+        teacher_load = {teacher.id: 0 for teacher in theory_teachers}
+        max_load = len(self.slots) // len(theory_teachers) + 1
+        
+        # Sort slots to ensure better distribution
+        sorted_slots = sorted(self.slots, key=lambda x: datetime.strptime(x, '%H:%M'))
+        
+        for slot in sorted_slots:
+            if slot not in self.schedule:
+                # Find an available teacher with the least load
+                available_teachers.sort(key=lambda t: (teacher_load[t.id], -len(self.get_available_slots(t.id))))
+                for teacher in available_teachers:
+                    if (teacher_availability[teacher.id] and 
+                        teacher_load[teacher.id] < max_load and
+                        not self.is_teacher_busy(teacher.id, slot)):
+                        self.schedule[slot] = teacher
+                        teacher_availability[teacher.id] = False
+                        teacher_load[teacher.id] += 1
+                        break
+
+    def is_teacher_busy(self, teacher_id, slot):
+        """Check if teacher is already scheduled in this slot in any division"""
+        for div_schedule in self.existing_schedules.values():
+            if slot in div_schedule and div_schedule[slot].id == teacher_id:
+                return True
+        return False
+
+    def get_available_slots(self, teacher_id):
+        """Get list of slots where teacher is available"""
+        return [slot for slot in self.slots 
+                if slot not in self.schedule and not self.is_teacher_busy(teacher_id, slot)]
 
     def calculate_fitness(self):
         score = 0
-        used_teachers = set()
-        consecutive_classes = 0
+        teacher_slots = {}  # Track slots for each teacher
+        consecutive_classes = {}  # Track consecutive classes for each teacher
         last_teacher = None
         
         # Sort slots by time
@@ -234,28 +269,57 @@ class TimetableChromosome:
         else:
             score -= 400  # Penalize if not exactly one practical
         
-        # Check theory scheduling
+        # Check theory scheduling and teacher collisions
         for i, (slot, teacher) in enumerate(sorted_slots):
             if teacher.lecture_type == 'theory':
+                # Track teacher slots
+                if teacher.id not in teacher_slots:
+                    teacher_slots[teacher.id] = []
+                teacher_slots[teacher.id].append(slot)
+                
                 # Check for consecutive classes
                 if teacher == last_teacher:
-                    consecutive_classes += 1
-                    score -= 10 * consecutive_classes
+                    if teacher.id not in consecutive_classes:
+                        consecutive_classes[teacher.id] = 1
+                    consecutive_classes[teacher.id] += 1
+                    score -= 30 * consecutive_classes[teacher.id]  # Increased penalty for consecutive classes
                 else:
-                    consecutive_classes = 0
+                    consecutive_classes[teacher.id] = 0
                     last_teacher = teacher
+                
                 score += 10  # Reward proper theory scheduling
             
-            used_teachers.add(teacher)
+            # Check for teacher collisions
+            for other_teacher_id, other_slots in teacher_slots.items():
+                if other_teacher_id != teacher.id:
+                    if slot in other_slots:
+                        score -= 2000  # Heavily penalize teacher collisions
+        
+        # Check for collisions with other divisions
+        for slot, teacher in self.schedule.items():
+            if self.is_teacher_busy(teacher.id, slot):
+                score -= 3000  # Even heavier penalty for cross-division collisions
         
         # Reward using all available teachers
-        score += 5 * len(used_teachers)
+        score += 5 * len(teacher_slots)
+        
+        # Penalize unused teachers
+        unused_teachers = len(self.teachers) - len(teacher_slots)
+        score -= 200 * unused_teachers  # Increased penalty for unused teachers
+        
+        # Check teacher load distribution
+        teacher_loads = [len(slots) for slots in teacher_slots.values()]
+        if teacher_loads:
+            avg_load = sum(teacher_loads) / len(teacher_loads)
+            for load in teacher_loads:
+                if abs(load - avg_load) > 1:  # If load is significantly different from average
+                    score -= 100 * abs(load - avg_load)  # Increased penalty for uneven distribution
         
         self.fitness = score
         return score
 
     def crossover(self, other):
-        child = TimetableChromosome(self.slots, self.teachers)
+        child = TimetableChromosome(self.slots, self.teachers, self.division_id, self.existing_schedules)
         
         # Get practical blocks from both parents
         parent1_practical = None
@@ -289,29 +353,77 @@ class TimetableChromosome:
             slot_index = self.slots.index(slot)
             if slot_index + 1 < len(self.slots):
                 next_slot = self.slots[slot_index + 1]
-                child.schedule[slot] = teacher
-                child.schedule[next_slot] = teacher
+                if not self.is_teacher_busy(teacher.id, slot) and not self.is_teacher_busy(teacher.id, next_slot):
+                    child.schedule[slot] = teacher
+                    child.schedule[next_slot] = teacher
         
-        # Fill remaining slots with theory teachers
+        # Fill remaining slots with theory teachers using both parents
         theory_teachers = [t for t in self.teachers if t.lecture_type == 'theory']
         available_teachers = theory_teachers.copy()
-        random.shuffle(available_teachers)  # Shuffle for random selection
+        random.shuffle(available_teachers)
+        
+        # Track used teachers and their loads
+        used_teachers = set()
+        teacher_load = {teacher.id: 0 for teacher in theory_teachers}
+        max_load = len(self.slots) // len(theory_teachers) + 1
         
         for slot in self.slots:
-            if slot not in child.schedule and available_teachers:
-                teacher = available_teachers.pop()
-                child.schedule[slot] = teacher
+            if slot not in child.schedule:
+                # Try to get a teacher from either parent
+                parent1_teacher = self.schedule.get(slot)
+                parent2_teacher = other.schedule.get(slot)
+                
+                # Choose a teacher that hasn't been used too much and isn't busy
+                if (parent1_teacher and parent1_teacher.id not in used_teachers and 
+                    teacher_load[parent1_teacher.id] < max_load and
+                    not self.is_teacher_busy(parent1_teacher.id, slot)):
+                    child.schedule[slot] = parent1_teacher
+                    used_teachers.add(parent1_teacher.id)
+                    teacher_load[parent1_teacher.id] += 1
+                elif (parent2_teacher and parent2_teacher.id not in used_teachers and 
+                      teacher_load[parent2_teacher.id] < max_load and
+                      not self.is_teacher_busy(parent2_teacher.id, slot)):
+                    child.schedule[slot] = parent2_teacher
+                    used_teachers.add(parent2_teacher.id)
+                    teacher_load[parent2_teacher.id] += 1
+                else:
+                    # If no available teacher from parents, use a random available teacher
+                    available_teachers.sort(key=lambda t: (teacher_load[t.id], -len(self.get_available_slots(t.id))))
+                    for teacher in available_teachers:
+                        if (teacher.id not in used_teachers and 
+                            teacher_load[teacher.id] < max_load and
+                            not self.is_teacher_busy(teacher.id, slot)):
+                            child.schedule[slot] = teacher
+                            used_teachers.add(teacher.id)
+                            teacher_load[teacher.id] += 1
+                            break
         
         return child
 
-    def mutate(self, mutation_rate=0.1):
+    def mutate(self, mutation_rate=0.3):
         if random.random() < mutation_rate:
             # Only mutate theory teachers, keep practical block intact
             theory_slots = [slot for slot, teacher in self.schedule.items() 
                           if teacher.lecture_type == 'theory']
+            
             if len(theory_slots) >= 2:
+                # Get two random slots
                 slot1, slot2 = random.sample(theory_slots, 2)
-                self.schedule[slot1], self.schedule[slot2] = self.schedule[slot2], self.schedule[slot1]
+                
+                # Get the teachers
+                teacher1 = self.schedule[slot1]
+                teacher2 = self.schedule[slot2]
+                
+                # Swap teachers only if they're different and it won't cause collisions
+                if teacher1 != teacher2:
+                    # Check if the swap would cause consecutive classes or collisions
+                    time1 = datetime.strptime(slot1, '%H:%M')
+                    time2 = datetime.strptime(slot2, '%H:%M')
+                    if (abs((time2 - time1).total_seconds() / 3600) > 1 and  # Not consecutive
+                        not self.is_teacher_busy(teacher1.id, slot2) and     # No collision for teacher1
+                        not self.is_teacher_busy(teacher2.id, slot1)):       # No collision for teacher2
+                        self.schedule[slot1] = teacher2
+                        self.schedule[slot2] = teacher1
 
 def generate_timetable_slots(timings):
     slots = []
@@ -337,93 +449,244 @@ def generate_timetable_slots(timings):
     
     return slots
 
-def genetic_algorithm(slots, teachers, population_size=50, generations=100):
-    # Initialize population
-    population = [TimetableChromosome(slots, teachers) for _ in range(population_size)]
-    
-    for generation in range(generations):
-        # Calculate fitness for all chromosomes
-        for chromosome in population:
-            chromosome.calculate_fitness()
+def genetic_algorithm(slots, teachers, division_id=None, existing_schedules=None, population_size=300, generations=500):
+    try:
+        app.logger.info(f"Starting genetic algorithm for division {division_id}")
+        app.logger.info(f"Population size: {population_size}, Generations: {generations}")
+        app.logger.info(f"Number of slots: {len(slots)}, Number of teachers: {len(teachers)}")
         
-        # Sort population by fitness
-        population.sort(key=lambda x: x.fitness, reverse=True)
+        if not slots or not teachers:
+            app.logger.error("Invalid input: slots or teachers list is empty")
+            return None
+            
+        # Initialize population
+        try:
+            population = []
+            for i in range(population_size):
+                try:
+                    chromosome = TimetableChromosome(slots, teachers, division_id, existing_schedules)
+                    chromosome.calculate_fitness()
+                    population.append(chromosome)
+                except Exception as e:
+                    app.logger.error(f"Error creating chromosome {i}: {str(e)}")
+                    continue
+            
+            if not population:
+                app.logger.error("Failed to create any valid chromosomes")
+                return None
+                
+        except Exception as e:
+            app.logger.error(f"Error initializing population: {str(e)}")
+            return None
         
-        # Select top 50% for next generation
-        next_generation = population[:population_size//2]
+        best_fitness = float('-inf')
+        no_improvement_count = 0
+        best_solution = None
         
-        # Create offspring through crossover
-        while len(next_generation) < population_size:
-            parent1 = random.choice(population[:population_size//2])
-            parent2 = random.choice(population[:population_size//2])
-            child = parent1.crossover(parent2)
-            child.mutate()
-            next_generation.append(child)
+        for generation in range(generations):
+            try:
+                # Calculate fitness for all chromosomes
+                for chromosome in population:
+                    try:
+                        chromosome.calculate_fitness()
+                    except Exception as e:
+                        app.logger.error(f"Error calculating fitness: {str(e)}")
+                        continue
+                
+                # Sort population by fitness
+                population.sort(key=lambda x: x.fitness, reverse=True)
+                
+                # Keep track of best solution
+                if population[0].fitness > best_fitness:
+                    best_fitness = population[0].fitness
+                    best_solution = population[0]
+                    no_improvement_count = 0
+                    app.logger.info(f"New best fitness found: {best_fitness} in generation {generation}")
+                else:
+                    no_improvement_count += 1
+                
+                # Early stopping if no improvement for too long
+                if no_improvement_count > 100:
+                    app.logger.info(f"Early stopping at generation {generation} due to no improvement")
+                    break
+                
+                # Select top 50% for next generation
+                next_generation = population[:population_size//2]
+                
+                # Create offspring through crossover
+                while len(next_generation) < population_size:
+                    try:
+                        parent1 = random.choice(population[:population_size//2])
+                        parent2 = random.choice(population[:population_size//2])
+                        child = parent1.crossover(parent2)
+                        child.mutate(mutation_rate=0.3)
+                        child.calculate_fitness()
+                        next_generation.append(child)
+                    except Exception as e:
+                        app.logger.error(f"Error creating offspring: {str(e)}")
+                        continue
+                
+                population = next_generation
+                
+                # Early stopping if we have a good solution
+                if population[0].fitness > 2000:
+                    app.logger.info(f"Early stopping at generation {generation} due to good solution")
+                    break
+                    
+            except Exception as e:
+                app.logger.error(f"Error in generation {generation}: {str(e)}")
+                continue
         
-        population = next_generation
-    
-    # Return best solution
-    return max(population, key=lambda x: x.fitness)
+        if not best_solution:
+            app.logger.error("No valid solution found after all generations")
+            return None
+            
+        app.logger.info(f"Genetic algorithm completed for division {division_id}")
+        app.logger.info(f"Best fitness achieved: {best_fitness}")
+        return best_solution
+        
+    except Exception as e:
+        app.logger.error(f"Critical error in genetic algorithm: {str(e)}")
+        app.logger.error(f"Error type: {type(e).__name__}")
+        return None
 
 @app.route('/generate-timetable', methods=['POST'])
 @login_required
 def generate_timetable():
-    # Clear existing timetable for the day
-    Timetable.query.filter_by(
-        hod_id=current_user.id,
-        date=datetime.now().date()
-    ).delete()
-    
-    timings = CollegeTimings.query.filter_by(hod_id=current_user.id).first()
-    if not timings:
-        return jsonify({'error': 'Please set college timings first'}), 400
-    
-    teachers = Teacher.query.filter_by(
-        hod_id=current_user.id,
-        is_present=True
-    ).all()
-    
-    if not teachers:
-        return jsonify({'error': 'No teachers marked present today'}), 400
-    
-    # Generate time slots
-    slots = generate_timetable_slots(timings)
-    if not slots:
-        return jsonify({'error': 'No valid time slots available'}), 400
-    
-    # Run genetic algorithm
-    best_solution = genetic_algorithm(slots, teachers)
-    
-    # Convert solution to timetable format
-    timetable = []
-    for slot, teacher in best_solution.schedule.items():
-        end_time = (datetime.strptime(slot, '%H:%M') + timedelta(minutes=60)).strftime('%H:%M')
-        timetable.append({
-            'teacher_id': teacher.id,
-            'teacher_name': teacher.name,
-            'start_time': slot,
-            'end_time': end_time,
-            'subject': teacher.subject,
-            'lecture_type': teacher.lecture_type
-        })
-    
-    # Sort timetable by start time
-    timetable.sort(key=lambda x: datetime.strptime(x['start_time'], '%H:%M'))
-    
-    # Save generated timetable
-    for entry in timetable:
-        db.session.add(Timetable(
+    try:
+        # Get number of divisions from request
+        data = request.get_json()
+        if not data:
+            app.logger.error("Invalid request data: No JSON data received")
+            return jsonify({'error': 'Invalid request data'}), 400
+            
+        num_divisions = data.get('num_divisions', 1)
+        if not isinstance(num_divisions, int) or num_divisions < 1:
+            app.logger.error(f"Invalid number of divisions: {num_divisions}")
+            return jsonify({'error': 'Invalid number of divisions'}), 400
+        
+        # Clear existing timetable for the day
+        try:
+            Timetable.query.filter_by(
+                hod_id=current_user.id,
+                date=datetime.now().date()
+            ).delete()
+            db.session.commit()
+        except Exception as e:
+            app.logger.error(f"Error clearing existing timetable: {str(e)}")
+            return jsonify({'error': 'Error clearing existing timetable'}), 500
+        
+        timings = CollegeTimings.query.filter_by(hod_id=current_user.id).first()
+        if not timings:
+            app.logger.error("College timings not set")
+            return jsonify({'error': 'Please set college timings first'}), 400
+        
+        teachers = Teacher.query.filter_by(
             hod_id=current_user.id,
-            date=datetime.now().date(),
-            teacher_id=entry['teacher_id'],
-            start_time=entry['start_time'],
-            end_time=entry['end_time'],
-            subject=entry['subject'],
-            lecture_type=entry['lecture_type']
-        ))
-    
-    db.session.commit()
-    return jsonify({'success': True, 'timetable': timetable})
+            is_present=True
+        ).all()
+        
+        if not teachers:
+            app.logger.error("No teachers marked present today")
+            return jsonify({'error': 'No teachers marked present today'}), 400
+        
+        app.logger.info(f"Found {len(teachers)} teachers present for {num_divisions} divisions")
+        
+        # Generate time slots
+        slots = generate_timetable_slots(timings)
+        if not slots:
+            app.logger.error("No valid time slots available")
+            return jsonify({'error': 'No valid time slots available'}), 400
+        
+        app.logger.info(f"Generated {len(slots)} time slots")
+        
+        # Generate timetables for each division
+        all_timetables = []
+        existing_schedules = {}  # Track schedules of other divisions
+        
+        for division in range(num_divisions):
+            try:
+                app.logger.info(f"Generating timetable for division {division + 1}")
+                
+                # Run genetic algorithm for this division
+                best_solution = genetic_algorithm(slots, teachers, division + 1, existing_schedules)
+                
+                if not best_solution:
+                    app.logger.error(f"No valid solution found for division {division + 1}")
+                    return jsonify({'error': f'No valid solution found for division {division + 1}'}), 500
+                
+                if not best_solution.schedule:
+                    app.logger.error(f"Empty schedule generated for division {division + 1}")
+                    return jsonify({'error': f'Empty schedule generated for division {division + 1}'}), 500
+                
+                # Store this division's schedule
+                existing_schedules[division + 1] = best_solution.schedule
+                
+                # Convert solution to timetable format
+                timetable = []
+                for slot, teacher in best_solution.schedule.items():
+                    try:
+                        end_time = (datetime.strptime(slot, '%H:%M') + timedelta(minutes=60)).strftime('%H:%M')
+                        timetable.append({
+                            'teacher_id': teacher.id,
+                            'teacher_name': teacher.name,
+                            'start_time': slot,
+                            'end_time': end_time,
+                            'subject': teacher.subject,
+                            'lecture_type': teacher.lecture_type
+                        })
+                    except Exception as e:
+                        app.logger.error(f"Error processing slot {slot} for teacher {teacher.name}: {str(e)}")
+                        continue
+                
+                if not timetable:
+                    app.logger.error(f"Empty timetable generated for division {division + 1}")
+                    return jsonify({'error': f'Empty timetable generated for division {division + 1}'}), 500
+                
+                # Sort timetable by start time
+                timetable.sort(key=lambda x: datetime.strptime(x['start_time'], '%H:%M'))
+                all_timetables.append(timetable)
+                
+                # Save generated timetable
+                for entry in timetable:
+                    try:
+                        db.session.add(Timetable(
+                            hod_id=current_user.id,
+                            date=datetime.now().date(),
+                            teacher_id=entry['teacher_id'],
+                            start_time=entry['start_time'],
+                            end_time=entry['end_time'],
+                            subject=entry['subject'],
+                            lecture_type=entry['lecture_type'],
+                            division=division + 1
+                        ))
+                    except Exception as e:
+                        app.logger.error(f"Error saving timetable entry: {str(e)}")
+                        db.session.rollback()
+                        return jsonify({'error': f'Error saving timetable entry: {str(e)}'}), 500
+                
+                try:
+                    db.session.commit()
+                except Exception as e:
+                    app.logger.error(f"Error committing timetable for division {division + 1}: {str(e)}")
+                    db.session.rollback()
+                    return jsonify({'error': f'Error saving timetable for division {division + 1}'}), 500
+                
+                app.logger.info(f"Successfully generated timetable for division {division + 1}")
+                
+            except Exception as e:
+                app.logger.error(f"Error generating timetable for division {division + 1}: {str(e)}")
+                app.logger.error(f"Error details: {type(e).__name__}: {str(e)}")
+                db.session.rollback()
+                return jsonify({'error': f'Error generating timetable for division {division + 1}: {str(e)}'}), 500
+        
+        return jsonify({'success': True, 'timetables': all_timetables})
+        
+    except Exception as e:
+        app.logger.error(f"Error in generate_timetable: {str(e)}")
+        app.logger.error(f"Error details: {type(e).__name__}: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': f'An error occurred while generating timetable: {str(e)}'}), 500
 
 @app.route('/download-timetable')
 @login_required
@@ -432,7 +695,7 @@ def download_timetable():
     timetable = Timetable.query.filter_by(
         hod_id=current_user.id,
         date=datetime.now().date()
-    ).all()
+    ).order_by(Timetable.division, Timetable.start_time).all()
     
     if not timetable:
         flash('No timetable generated for today')
@@ -447,23 +710,41 @@ def download_timetable():
     p.drawString(100, 750, f"Timetable for {current_user.department} Department")
     p.drawString(100, 730, f"Date: {datetime.now().strftime('%Y-%m-%d')}")
     
-    # Add table header
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(100, 700, "Time")
-    p.drawString(200, 700, "Subject")
-    p.drawString(300, 700, "Teacher")
-    p.drawString(400, 700, "Type")
+    y = 700
+    current_division = None
     
-    # Add table content
-    p.setFont("Helvetica", 12)
-    y = 680
     for entry in timetable:
+        if current_division != entry.division:
+            current_division = entry.division
+            y -= 30
+            p.setFont("Helvetica-Bold", 14)
+            p.drawString(100, y, f"Division {current_division}")
+            y -= 20
+            
+            # Add table header
+            p.setFont("Helvetica-Bold", 12)
+            p.drawString(100, y, "Time")
+            p.drawString(200, y, "Subject")
+            p.drawString(300, y, "Teacher")
+            p.drawString(400, y, "Type")
+            y -= 20
+        
+        # Add table content
+        p.setFont("Helvetica", 12)
         teacher = Teacher.query.get(entry.teacher_id)
         p.drawString(100, y, f"{entry.start_time} - {entry.end_time}")
         p.drawString(200, y, entry.subject)
         p.drawString(300, y, teacher.name)
         p.drawString(400, y, entry.lecture_type)
         y -= 20
+        
+        # Add page break if needed
+        if y < 50:
+            p.showPage()
+            y = 750
+            p.setFont("Helvetica-Bold", 16)
+            p.drawString(100, y, f"Timetable for {current_user.department} Department (Continued)")
+            y -= 30
     
     p.save()
     buffer.seek(0)

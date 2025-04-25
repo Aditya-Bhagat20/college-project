@@ -95,6 +95,10 @@
 
 <div class="card">
     <h3>Generate Timetable</h3>
+    <div class="form-group">
+        <label for="num_divisions">Number of Divisions:</label>
+        <input type="number" id="num_divisions" name="num_divisions" min="1" max="10" value="1" required>
+    </div>
     <button id="generate-btn" class="btn">Generate Today's Timetable</button>
     <div id="timetable-result" style="margin-top: 20px;"></div>
 </div>
@@ -134,47 +138,69 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Handle timetable generation
     document.getElementById('generate-btn').addEventListener('click', function() {
+        const numDivisions = document.getElementById('num_divisions').value;
+        console.log('Generating timetable for', numDivisions, 'divisions');
+        
         fetch('/generate-timetable', {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                num_divisions: parseInt(numDivisions)
+            })
         })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(data => {
+                    throw new Error(data.error || 'Failed to generate timetable');
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.success) {
                 const resultDiv = document.getElementById('timetable-result');
-                resultDiv.innerHTML = '<h4>Generated Timetable</h4>';
+                resultDiv.innerHTML = '<h4>Generated Timetables</h4>';
                 
-                if (data.timetable.length === 0) {
-                    resultDiv.innerHTML += '<p>No timetable generated. Please check if you have set timings and marked teachers present.</p>';
+                if (data.timetables.length === 0) {
+                    resultDiv.innerHTML += '<p>No timetables generated. Please check if you have set timings and marked teachers present.</p>';
                     return;
                 }
                 
-                const table = document.createElement('table');
-                const thead = document.createElement('thead');
-                const tbody = document.createElement('tbody');
-                
-                // Create header
-                const headerRow = document.createElement('tr');
-                ['Time', 'Subject', 'Teacher', 'Type'].forEach(text => {
-                    const th = document.createElement('th');
-                    th.textContent = text;
-                    headerRow.appendChild(th);
-                });
-                thead.appendChild(headerRow);
-                
-                // Create rows
-                data.timetable.forEach(entry => {
-                    const row = document.createElement('tr');
-                    [entry.start_time + ' - ' + entry.end_time, entry.subject, entry.teacher_name, entry.lecture_type].forEach(text => {
-                        const td = document.createElement('td');
-                        td.textContent = text;
-                        row.appendChild(td);
+                data.timetables.forEach((timetable, index) => {
+                    const divisionHeader = document.createElement('h5');
+                    divisionHeader.textContent = `Division ${index + 1}`;
+                    resultDiv.appendChild(divisionHeader);
+                    
+                    const table = document.createElement('table');
+                    const thead = document.createElement('thead');
+                    const tbody = document.createElement('tbody');
+                    
+                    // Create header
+                    const headerRow = document.createElement('tr');
+                    ['Time', 'Subject', 'Teacher', 'Type'].forEach(text => {
+                        const th = document.createElement('th');
+                        th.textContent = text;
+                        headerRow.appendChild(th);
                     });
-                    tbody.appendChild(row);
+                    thead.appendChild(headerRow);
+                    
+                    // Create rows
+                    timetable.forEach(entry => {
+                        const row = document.createElement('tr');
+                        [entry.start_time + ' - ' + entry.end_time, entry.subject, entry.teacher_name, entry.lecture_type].forEach(text => {
+                            const td = document.createElement('td');
+                            td.textContent = text;
+                            row.appendChild(td);
+                        });
+                        tbody.appendChild(row);
+                    });
+                    
+                    table.appendChild(thead);
+                    table.appendChild(tbody);
+                    resultDiv.appendChild(table);
                 });
-                
-                table.appendChild(thead);
-                table.appendChild(tbody);
-                resultDiv.appendChild(table);
                 
                 // Add download button
                 const downloadBtn = document.createElement('button');
@@ -183,12 +209,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 downloadBtn.onclick = () => window.location.href = '/download-timetable';
                 resultDiv.appendChild(downloadBtn);
             } else {
-                alert('Failed to generate timetable: ' + data.error);
+                throw new Error(data.error || 'Failed to generate timetable');
             }
         })
         .catch(error => {
             console.error('Error:', error);
-            alert('An error occurred while generating timetable');
+            alert('Error: ' + error.message);
         });
     });
 });

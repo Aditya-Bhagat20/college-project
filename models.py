@@ -45,4 +45,5 @@ class Timetable(db.Model):
     start_time = db.Column(db.String(5), nullable=False)
     end_time = db.Column(db.String(5), nullable=False)
     subject = db.Column(db.String(100), nullable=False)
-    lecture_type = db.Column(db.String(20), nullable=False) 
+    lecture_type = db.Column(db.String(20), nullable=False)
+    division = db.Column(db.Integer, nullable=False) 
